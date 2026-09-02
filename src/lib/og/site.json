@@ -1,6 +1,6 @@
 {
-  "title": "Lookalike",
+  "title": "Orbyt: Custom Character",
   "type": "x:game",
   "card": "custom",
-  "description": "Match a 3D cartoon boy to your hair, skin, and eye color from a photo."
+  "description": "Recolor a 3D cartoon character — hair, skin, and eyes mapped on the mesh."
 }
