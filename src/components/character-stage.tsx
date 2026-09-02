@@ -65,12 +65,13 @@ function Character() {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       const mat = mesh.material as MeshStandardMaterial;
-      if (mat?.map && !recolorer.current) {
-        mat.map.colorSpace = SRGBColorSpace;
+      if (mat && !recolorer.current) {
+        if (mat.map) mat.map.colorSpace = SRGBColorSpace;
         mat.roughness = 0.72;
         mat.metalness = 0.02;
         recolorer.current = new TextureRecolorer(mat.map, mesh);
         setDefaults(recolorer.current.defaults);
+        recolorer.current.apply(useStudio.getState().colors, useStudio.getState().strength);
       }
     });
 
@@ -89,14 +90,6 @@ function Character() {
     const key = `${colors.hair}|${colors.skin}|${colors.eyes}|${strength}`;
     if (key === lastKey.current) return;
     lastKey.current = key;
-    const isDefault =
-      colors.hair === rec.defaults.hair &&
-      colors.skin === rec.defaults.skin &&
-      colors.eyes === rec.defaults.eyes;
-    if (isDefault) {
-      rec.reset();
-      return;
-    }
     rec.apply(colors, strength);
   }, [colors, strength]);
 
@@ -184,10 +177,10 @@ export function CharacterStage() {
   return (
     <div className="absolute inset-0">
       <Canvas
-        camera={{ position: [0.55, 1.32, 2.75], fov: 30, near: 0.05, far: 50 }}
+        camera={{ position: [0.28, 0.92, 3.85], fov: 32, near: 0.05, far: 50 }}
         shadows
         dpr={[1, 2]}
-        gl={{ antialias: true, alpha: true }}
+        gl={{ antialias: true, alpha: true, preserveDrawingBuffer: true }}
         onCreated={({ gl, scene }) => {
           gl.toneMappingExposure = 1.08;
           gl.shadowMap.type = PCFShadowMap;
@@ -217,10 +210,10 @@ export function CharacterStage() {
           makeDefault
           enableDamping
           enablePan={false}
-          target={[0.12, 1.08, 0]}
-          minDistance={1.2}
-          maxDistance={6}
-          maxPolarAngle={Math.PI * 0.5}
+          target={[0.02, 0.7, 0]}
+          minDistance={2.2}
+          maxDistance={8}
+          maxPolarAngle={Math.PI * 0.495}
         />
       </Canvas>
       <div className="loader-wrap">
