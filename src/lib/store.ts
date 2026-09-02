@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { FALLBACK_COLORS, PRESETS, type ColorSet } from "./recolor";
+import { FALLBACK_COLORS, PRESETS, hsvHex, type ColorSet } from "./recolor";
 
 export type DetectedColors = {
   hair: string | null;
@@ -27,6 +27,8 @@ type StudioState = {
   applyDetected: () => void;
   reset: () => void;
   surprise: () => void;
+  random: () => void;
+  totallyRandom: () => void;
 };
 
 function pick<T>(arr: T[]): T {
@@ -36,7 +38,7 @@ function pick<T>(arr: T[]): T {
 export const useStudio = create<StudioState>((set, get) => ({
   colors: { ...FALLBACK_COLORS },
   defaults: { ...FALLBACK_COLORS },
-  strength: 0.85,
+  strength: 1,
   clip: "idle",
   clips: [],
   ready: false,
@@ -62,7 +64,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
   reset: () => {
     const { defaults } = get();
-    set({ colors: { ...defaults } });
+    set({ colors: { ...defaults }, strength: 1 });
   },
   surprise: () =>
     set({
@@ -70,6 +72,22 @@ export const useStudio = create<StudioState>((set, get) => ({
         hair: pick(PRESETS.hair),
         skin: pick(PRESETS.skin),
         eyes: pick(PRESETS.eyes),
+      },
+    }),
+  random: () =>
+    set({
+      colors: {
+        hair: pick(PRESETS.hair),
+        skin: pick(PRESETS.skin),
+        eyes: pick(PRESETS.eyes),
+      },
+    }),
+  totallyRandom: () =>
+    set({
+      colors: {
+        hair: hsvHex(Math.random(), 0.4 + Math.random() * 0.6, 0.16 + Math.random() * 0.7),
+        skin: hsvHex(Math.random(), 0.12 + Math.random() * 0.55, 0.42 + Math.random() * 0.52),
+        eyes: hsvHex(Math.random(), 0.35 + Math.random() * 0.65, 0.18 + Math.random() * 0.55),
       },
     }),
 }));
