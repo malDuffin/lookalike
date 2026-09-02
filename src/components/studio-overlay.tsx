@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Palette, RotateCcw, ScanFace, Shuffle } from "lucide-react";
+import { Dices, Palette, RotateCcw, ScanFace, Shuffle } from "lucide-react";
 import { PRESETS, type Channel } from "@/lib/recolor";
 import { useStudio } from "@/lib/store";
 import { FaceMatch } from "./face-match";
@@ -66,7 +66,8 @@ export function StudioOverlay() {
   const strength = useStudio((s) => s.strength);
   const setStrength = useStudio((s) => s.setStrength);
   const reset = useStudio((s) => s.reset);
-  const surprise = useStudio((s) => s.surprise);
+  const random = useStudio((s) => s.random);
+  const totallyRandom = useStudio((s) => s.totallyRandom);
 
   return (
     <>
@@ -75,7 +76,7 @@ export function StudioOverlay() {
         <div className="studio-top">
           <header className="brand-lockup stagger-item">
             <p className="eyebrow">Studio</p>
-            <h1>Lookalike</h1>
+            <h1>Orbyt: Custom Character</h1>
             <p className="lede">Recolor hair, skin and eyes — or match them from a face.</p>
           </header>
 
@@ -105,7 +106,7 @@ export function StudioOverlay() {
         <LiquidGlass as="aside" className="studio-panel">
           <div className="panel-head">
             <h2>Customize</h2>
-            <p>Colors remap on the atlas. Shading stays on the model.</p>
+            <p>Hair, skin and eyes are mapped on the mesh. Clothes stay put.</p>
           </div>
 
           <div className="lg-tabs" role="tablist" aria-label="Studio panels">
@@ -140,14 +141,18 @@ export function StudioOverlay() {
                 <ChannelRow channel="skin" label="Skin" />
                 <ChannelRow channel="eyes" label="Eyes" />
               </div>
-              <div className="mt-4 flex gap-2">
+              <div className="mt-4 flex flex-wrap gap-2">
                 <button type="button" className="lg-btn" onClick={reset}>
                   <RotateCcw className="size-3.5" />
                   Reset
                 </button>
-                <button type="button" className="lg-btn" onClick={surprise}>
+                <button type="button" className="lg-btn" onClick={random}>
                   <Shuffle className="size-3.5" />
-                  Surprise
+                  Random
+                </button>
+                <button type="button" className="lg-btn" onClick={totallyRandom}>
+                  <Dices className="size-3.5" />
+                  Totally Random
                 </button>
               </div>
               <label className="mt-4 flex items-center gap-3 text-sm text-muted">
@@ -162,6 +167,9 @@ export function StudioOverlay() {
                   className="strength-range"
                 />
               </label>
+              <p className="mt-2 text-xs text-muted">
+                Strength 0 is grayscale. At 100% hair, skin and iris take the picked colours.
+              </p>
             </section>
           ) : (
             <FaceMatch />
