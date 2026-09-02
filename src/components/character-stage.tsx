@@ -35,6 +35,23 @@ function prettyClip(name: string) {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function pickCharacterMesh(root: Group) {
+  let best: Mesh | null = null;
+  let bestCount = -1;
+  root.traverse((obj) => {
+    const mesh = obj as Mesh;
+    if (!mesh.isMesh) return;
+    const count = mesh.geometry?.getAttribute("position")?.count ?? 0;
+    const skinned = Boolean((mesh as Mesh & { skeleton?: unknown }).skeleton);
+    const score = count + (skinned ? 1_000_000 : 0);
+    if (score > bestCount) {
+      best = mesh;
+      bestCount = score;
+    }
+  });
+  return best;
+}
+
 function Character() {
   const gltf = useGLTF(MODEL_URL);
   const recolorer = useRef<TextureRecolorer | null>(null);
@@ -65,15 +82,20 @@ function Character() {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       const mat = mesh.material as MeshStandardMaterial;
-      if (mat && !recolorer.current) {
-        if (mat.map) mat.map.colorSpace = SRGBColorSpace;
+      if (mat?.map) mat.map.colorSpace = SRGBColorSpace;
+      if (mat) {
         mat.roughness = 0.72;
         mat.metalness = 0.02;
-        recolorer.current = new TextureRecolorer(mat.map, mesh);
-        setDefaults(recolorer.current.defaults);
-        recolorer.current.apply(useStudio.getState().colors, useStudio.getState().strength);
       }
     });
+
+    const mesh = pickCharacterMesh(cloned);
+    if (mesh && !recolorer.current) {
+      const mat = mesh.material as MeshStandardMaterial;
+      recolorer.current = new TextureRecolorer(mat?.map, mesh);
+      setDefaults(recolorer.current.defaults);
+      recolorer.current.apply(useStudio.getState().colors, useStudio.getState().strength);
+    }
 
     setClips(
       (gltf.animations ?? []).map((c) => ({
