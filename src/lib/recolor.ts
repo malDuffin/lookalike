@@ -1,5 +1,5 @@
-import type { BufferAttribute, BufferGeometry, Mesh, Skeleton, Texture } from "three";
-import { LinearFilter, SRGBColorSpace, Vector3 } from "three";
+import type { BufferAttribute, BufferGeometry, Mesh, MeshStandardMaterial, Skeleton } from "three";
+import { Color, Float32BufferAttribute, Vector3, type WebGLProgramParametersWithUniforms } from "three";
 
 export type Channel = "hair" | "skin" | "eyes";
 
@@ -105,35 +105,8 @@ export function hsvHex(h: number, s: number, v: number) {
   return `#${[r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function luma(r: number, g: number, b: number) {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function isWarm(h: number) {
-  return h < 0.14 || h > 0.9;
-}
-
-function isHairCore(h: number, s: number, v: number) {
-  return isWarm(h) && s > 0.45 && v > 0.08 && v < 0.88;
-}
-
-function isHairSoft(h: number, s: number, v: number) {
-  return isWarm(h) && s > 0.16 && v > 0.06 && v < 0.94;
-}
-
-function isPeachSkin(h: number, s: number, v: number) {
-  if (!isWarm(h)) return false;
-  if (s < 0.05 || s > 0.62) return false;
-  if (v < 0.28 || v > 0.98) return false;
-  if (s > 0.56 && v < 0.62) return false;
-  return true;
-}
-
-function isIrisColor(h: number, s: number, v: number) {
-  if (v < 0.12 || v > 0.62 || s < 0.18) return false;
-  const olive = h > 0.14 && h < 0.48;
-  const brown = (h < 0.1 || h > 0.92) && v < 0.45;
-  return olive || brown;
+export function rgbToHex(rgb: [number, number, number]) {
+  return `#${rgb.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function boneWeight(
@@ -150,101 +123,322 @@ function boneWeight(
   return w;
 }
 
-function fillTri(
-  ctx: CanvasRenderingContext2D,
-  pa: [number, number],
-  pb: [number, number],
-  pc: [number, number],
-) {
-  ctx.beginPath();
-  ctx.moveTo(pa[0], pa[1]);
-  ctx.lineTo(pb[0], pb[1]);
-  ctx.lineTo(pc[0], pc[1]);
-  ctx.closePath();
-  ctx.fill();
+function percentile(sorted: number[], p: number) {
+  if (!sorted.length) return 0;
+  const i = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
+  return sorted[i]!;
 }
 
-function rasterLayer(width: number, height: number) {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true, alpha: false });
-  if (!ctx) return null;
-  ctx.imageSmoothingEnabled = false;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#fff";
-  return ctx;
-}
+function classifyVertices(mesh: Mesh): { parts: Float32Array; eyeRig: EyeRig | null; stats: MaskStats } {
+  const geo = mesh.geometry as BufferGeometry;
+  const pos = geo.getAttribute("position") as BufferAttribute;
+  const nrm = geo.getAttribute("normal") as BufferAttribute | undefined;
+  const skinIndex = geo.getAttribute("skinIndex") as BufferAttribute | undefined;
+  const skinWeight = geo.getAttribute("skinWeight") as BufferAttribute | undefined;
+  const skeleton = (mesh as Mesh & { skeleton?: Skeleton }).skeleton;
+  const count = pos.count;
+  const parts = new Float32Array(count);
 
-function growSeeds(seeds: Uint8Array, allow: Uint8Array, width: number, height: number, steps: number) {
-  const out = new Uint8Array(seeds);
-  const q: number[] = [];
-  for (let p = 0; p < seeds.length; p++) if (seeds[p]) q.push(p);
-  let head = 0;
-  const dirs = [-1, 1, -width, width];
-  const dist = new Int16Array(seeds.length);
-  dist.fill(-1);
-  for (const p of q) dist[p] = 0;
-  while (head < q.length) {
-    const p = q[head++]!;
-    const d = dist[p]!;
-    if (d >= steps) continue;
-    for (const dir of dirs) {
-      const n = p + dir;
-      if (n < 0 || n >= out.length) continue;
-      if (out[n] || !allow[n]) continue;
-      if (Math.abs((n % width) - (p % width)) > 1) continue;
-      out[n] = 1;
-      dist[n] = d + 1;
-      q.push(n);
+  const headIds = new Set<number>();
+  const neckIds = new Set<number>();
+  const armIds = new Set<number>();
+  skeleton?.bones.forEach((bone, i) => {
+    const name = bone.name || "";
+    if (/^head$/i.test(name) || (/head/i.test(name) && !/thigh|wear/i.test(name))) headIds.add(i);
+    else if (/neck/i.test(name)) neckIds.add(i);
+    else if (/arm|hand|wrist|finger|thumb/i.test(name)) armIds.add(i);
+  });
+
+  const headIdx: number[] = [];
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  let zMin = Infinity;
+  for (let i = 0; i < count; i++) {
+    const hw = skinIndex && skinWeight && headIds.size ? boneWeight(skinIndex, skinWeight, i, headIds) : 0;
+    const nw = skinIndex && skinWeight ? boneWeight(skinIndex, skinWeight, i, neckIds) : 0;
+    const aw = skinIndex && skinWeight ? boneWeight(skinIndex, skinWeight, i, armIds) : 0;
+    if (aw > 0.28) {
+      parts[i] = CLS_SKIN;
+      continue;
+    }
+    if (nw > 0.32 && hw < 0.45) {
+      parts[i] = CLS_SKIN;
+      continue;
+    }
+    if (hw > 0.32) {
+      headIdx.push(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+      if (z < zMin) zMin = z;
     }
   }
-  return out;
-}
 
-function fillHoles(mask: Uint8Array, allow: Uint8Array, cls: number, width: number, height: number) {
-  const out = new Uint8Array(mask);
-  for (let round = 0; round < 5; round++) {
-    const src = new Uint8Array(out);
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const p = y * width + x;
-        if (src[p] || !allow[p]) continue;
-        let n = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (!dx && !dy) continue;
-            if (src[p + dy * width + dx] === cls) n++;
-          }
-        }
-        if (n >= 5) out[p] = cls;
-      }
+  const span = Math.max(yMax - yMin, 0.001);
+  const yHair = yMin + span * 0.56;
+  const yBrow = yMin + span * 0.46;
+  const yCheek = yMin + span * 0.2;
+  const zs: number[] = [];
+  const xs: number[] = [];
+  for (const i of headIdx) {
+    zs.push(pos.getZ(i));
+    xs.push(Math.abs(pos.getX(i)));
+  }
+  zs.sort((a, b) => a - b);
+  xs.sort((a, b) => a - b);
+  const zFace = percentile(zs, 0.18);
+  const xFace = percentile(xs, 0.55);
+
+  for (const i of headIdx) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const nz = nrm ? nrm.getZ(i) : -1;
+    const front = z < zFace + 0.02 && nz < 0.2;
+    const center = Math.abs(x) < Math.max(xFace, 0.09);
+    if (y >= yHair) {
+      parts[i] = CLS_HAIR;
+    } else if (front && center && y < yBrow + 0.015 && y > yCheek - 0.01) {
+      parts[i] = z < zFace - 0.028 ? CLS_HAIR : CLS_SKIN;
+    } else if (y >= yCheek) {
+      parts[i] = CLS_HAIR;
+    } else {
+      parts[i] = CLS_SKIN;
     }
   }
-  return out;
+
+  const index = geo.index;
+  if (index) {
+    const next = parts.slice();
+    for (let t = 0; t < index.count; t += 3) {
+      const a = index.getX(t);
+      const b = index.getX(t + 1);
+      const c = index.getX(t + 2);
+      const trio = [a, b, c];
+      const hasHair = trio.some((v) => parts[v] === CLS_HAIR);
+      if (!hasHair) continue;
+      for (const v of trio) {
+        if (parts[v] !== CLS_NONE) continue;
+        const hw = skinIndex && skinWeight ? boneWeight(skinIndex, skinWeight, v, headIds) : 0;
+        if (hw > 0.2) next[v] = CLS_HAIR;
+      }
+    }
+    parts.set(next);
+  }
+
+  let hair = 0;
+  let skin = 0;
+  for (let i = 0; i < count; i++) {
+    if (parts[i] === CLS_HAIR) hair++;
+    else if (parts[i] === CLS_SKIN) skin++;
+  }
+
+  return {
+    parts,
+    eyeRig: findEyeRigFromHead(pos, nrm, headIdx, yMin, yMax, zMin),
+    stats: { width: 0, height: 0, hair, skin, eyes: 0, ms: 0 },
+  };
 }
 
-function dilateMask(src: Uint8Array, width: number, height: number, radius: number) {
-  const out = new Uint8Array(src);
-  if (radius <= 0) return out;
-  for (let y = radius; y < height - radius; y++) {
-    for (let x = radius; x < width - radius; x++) {
-      const p = y * width + x;
-      if (src[p]) {
-        out[p] = 1;
-        continue;
-      }
-      let hit = 0;
-      for (let dy = -radius; dy <= radius && !hit; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          if (src[p + dy * width + dx]) {
-            hit = 1;
-            break;
-          }
-        }
-      }
-      if (hit) out[p] = 1;
+function findEyeRigFromHead(
+  pos: BufferAttribute,
+  nrm: BufferAttribute | undefined,
+  head: number[],
+  yMin: number,
+  yMax: number,
+  zMin: number,
+): EyeRig | null {
+  if (head.length < 40) return null;
+  const hy = Math.max(yMax - yMin, 0.001);
+  const yLo = yMin + hy * 0.28;
+  const yHi = yMin + hy * 0.58;
+  const zCut = zMin + 0.08;
+  const left: number[] = [];
+  const right: number[] = [];
+  for (const i of head) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    if (y < yLo || y > yHi || z > zCut) continue;
+    const ax = Math.abs(x);
+    if (ax < 0.018 || ax > 0.11) continue;
+    const nz = nrm ? nrm.getZ(i) : -1;
+    if (nz > 0.15) continue;
+    (x < 0 ? left : right).push(i);
+  }
+  const centroid = (ids: number[]) => {
+    const c = new Vector3();
+    if (!ids.length) return c;
+    for (const i of ids) c.add(new Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+    return c.multiplyScalar(1 / ids.length);
+  };
+  if (left.length < 5 || right.length < 5) {
+    return {
+      left: new Vector3(-0.038, yMin + hy * 0.42, zMin + 0.02),
+      right: new Vector3(0.038, yMin + hy * 0.42, zMin + 0.02),
+      iris: 0.018,
+      pupil: 0.0065,
+    };
+  }
+  return { left: centroid(left), right: centroid(right), iris: 0.018, pupil: 0.0065 };
+}
+
+export type MaskStats = {
+  width: number;
+  height: number;
+  hair: number;
+  skin: number;
+  eyes: number;
+  ms: number;
+};
+
+type RecolorUniforms = {
+  uHair: { value: Color };
+  uSkin: { value: Color };
+  uEyes: { value: Color };
+  uStrength: { value: number };
+  uEyeL: { value: Vector3 };
+  uEyeR: { value: Vector3 };
+  uPupil: { value: number };
+  uIris: { value: number };
+};
+
+export class TextureRecolorer {
+  defaults: ColorSet;
+  eyeRig: EyeRig | null;
+  stats: MaskStats;
+  private uniforms: RecolorUniforms | null = null;
+  private mat: MeshStandardMaterial | null = null;
+
+  constructor(_map: unknown, mesh: Mesh) {
+    const t0 = performance.now();
+    const { parts, eyeRig, stats } = classifyVertices(mesh);
+    const geo = mesh.geometry as BufferGeometry;
+    geo.setAttribute("aPart", new Float32BufferAttribute(parts, 1));
+
+    this.eyeRig = eyeRig;
+    this.defaults = { ...FALLBACK_COLORS };
+    this.stats = { ...stats, ms: performance.now() - t0 };
+
+    const mat = mesh.material as MeshStandardMaterial;
+    this.mat = mat;
+    const u: RecolorUniforms = {
+      uHair: { value: new Color(FALLBACK_COLORS.hair) },
+      uSkin: { value: new Color(FALLBACK_COLORS.skin) },
+      uEyes: { value: new Color(FALLBACK_COLORS.eyes) },
+      uStrength: { value: 1 },
+      uEyeL: { value: eyeRig?.left.clone() ?? new Vector3(-0.04, 0.8, -0.12) },
+      uEyeR: { value: eyeRig?.right.clone() ?? new Vector3(0.04, 0.8, -0.12) },
+      uPupil: { value: eyeRig?.pupil ?? 0.0065 },
+      uIris: { value: eyeRig?.iris ?? 0.018 },
+    };
+    this.uniforms = u;
+
+    mat.onBeforeCompile = (shader: WebGLProgramParametersWithUniforms) => {
+      shader.uniforms.uHair = u.uHair;
+      shader.uniforms.uSkin = u.uSkin;
+      shader.uniforms.uEyes = u.uEyes;
+      shader.uniforms.uStrength = u.uStrength;
+      shader.uniforms.uEyeL = u.uEyeL;
+      shader.uniforms.uEyeR = u.uEyeR;
+      shader.uniforms.uPupil = u.uPupil;
+      shader.uniforms.uIris = u.uIris;
+
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+attribute float aPart;
+varying float vPart;
+varying vec3 vBindPos;`,
+        )
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+vPart = aPart;
+vBindPos = position;`,
+        );
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+uniform vec3 uHair;
+uniform vec3 uSkin;
+uniform vec3 uEyes;
+uniform float uStrength;
+uniform vec3 uEyeL;
+uniform vec3 uEyeR;
+uniform float uPupil;
+uniform float uIris;
+varying float vPart;
+varying vec3 vBindPos;
+
+vec3 tintLuma(vec3 src, vec3 tint) {
+  float y = dot(src, vec3(0.2126, 0.7152, 0.0722));
+  float ty = max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.08);
+  return tint * (y / ty);
+}`,
+        )
+        .replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+{
+  float y = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  vec3 gray = vec3(y);
+  vec3 painted = diffuseColor.rgb;
+  float k = clamp(uStrength, 0.0, 1.0);
+
+  if (vPart > 0.5 && vPart < 1.5) {
+    painted = tintLuma(diffuseColor.rgb, uHair);
+  } else if (vPart > 1.5 && vPart < 2.5) {
+    painted = tintLuma(diffuseColor.rgb, uSkin);
+  }
+
+  float dL = distance(vBindPos, uEyeL);
+  float dR = distance(vBindPos, uEyeR);
+  vec3 ec = dL < dR ? uEyeL : uEyeR;
+  float r = length(vBindPos.xy - ec.xy);
+  float dz = abs(vBindPos.z - ec.z);
+  bool inEye = r < uIris && dz < 0.024 && vBindPos.z < -0.06;
+  if (inEye) {
+    float mx = max(diffuseColor.r, max(diffuseColor.g, diffuseColor.b));
+    float mn = min(diffuseColor.r, min(diffuseColor.g, diffuseColor.b));
+    bool sclera = (mx - mn) < 0.12 && y > 0.62;
+    if (r < uPupil) {
+      painted = vec3(0.05, 0.035, 0.03);
+    } else if (!sclera) {
+      float t = clamp((r - uPupil) / max(uIris - uPupil, 0.0001), 0.0, 1.0);
+      float ring = smoothstep(0.0, 0.16, t) * (1.0 - smoothstep(0.78, 1.0, t));
+      painted = uEyes * mix(0.42, 1.05, ring);
     }
   }
-  return out;
+
+  if (vPart > 0.5 || inEye) {
+    diffuseColor.rgb = mix(gray, painted, k);
+  } else {
+    diffuseColor.rgb = mix(gray, diffuseColor.rgb, k);
+  }
+}`,
+        );
+    };
+    mat.customProgramCacheKey = () => "orbyt-vertex-recolor-v1";
+    mat.needsUpdate = true;
+  }
+
+  apply(colors: ColorSet, strength: number) {
+    if (!this.uniforms) return;
+    this.uniforms.uHair.value.set(colors.hair);
+    this.uniforms.uSkin.value.set(colors.skin);
+    this.uniforms.uEyes.value.set(colors.eyes);
+    this.uniforms.uStrength.value = Math.min(1, Math.max(0, strength));
+    if (this.mat) this.mat.needsUpdate = true;
+  }
+
+  reset() {
+    this.apply(this.defaults, 1);
+  }
 }
+
+export { rgbToHsv, hexToRgb, hsvToRgb };
