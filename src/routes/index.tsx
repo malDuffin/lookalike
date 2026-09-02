@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { BootPanel } from "@/components/boot-panel";
 import { StudioOverlay } from "@/components/studio-overlay";
+import { useBoot } from "@/lib/boot";
 
 const CharacterStage = lazy(() =>
   import("@/components/character-stage").then((m) => ({ default: m.CharacterStage })),
@@ -12,7 +14,10 @@ export const Route = createFileRoute("/")({
 
 function Home() {
   const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    useBoot.getState().start();
+    setMounted(true);
+  }, []);
 
   return (
     <main className="studio-root">
@@ -24,6 +29,7 @@ function Home() {
         <div className="absolute inset-0" />
       )}
       <StudioOverlay />
+      <BootPanel />
     </main>
   );
 }

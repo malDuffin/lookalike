@@ -1,6 +1,6 @@
-# Lookalike
+# Orbyt: Custom Character
 
-A 3D character studio. Recolor hair, skin, and eyes on a cartoon boy — pick colors by hand, or match them from a photo or webcam.
+A 3D character studio. Recolor hair, skin, and eyes on a cartoon character — pick colors by hand, or match them from a photo or webcam.
 
 ## Features
 

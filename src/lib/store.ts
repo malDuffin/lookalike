@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { FALLBACK_COLORS, PRESETS, hsvHex, type ColorSet } from "./recolor";
+import { HEADWEAR, type HeadwearId } from "./headwear";
 
 export type DetectedColors = {
   hair: string | null;
@@ -13,6 +14,7 @@ type StudioState = {
   strength: number;
   clip: string;
   clips: { id: string; label: string }[];
+  headwear: HeadwearId;
   ready: boolean;
   loadError: string | null;
   detected: DetectedColors;
@@ -21,12 +23,12 @@ type StudioState = {
   setStrength: (value: number) => void;
   setClip: (clip: string) => void;
   setClips: (clips: { id: string; label: string }[]) => void;
+  setHeadwear: (id: HeadwearId) => void;
   setReady: (ready: boolean) => void;
   setLoadError: (message: string | null) => void;
   setDetected: (detected: DetectedColors) => void;
   applyDetected: () => void;
   reset: () => void;
-  surprise: () => void;
   random: () => void;
   totallyRandom: () => void;
 };
@@ -41,14 +43,20 @@ export const useStudio = create<StudioState>((set, get) => ({
   strength: 1,
   clip: "idle",
   clips: [],
+  headwear: HEADWEAR[0]!.id,
   ready: false,
   loadError: null,
   detected: { hair: null, skin: null, eyes: null },
   setColors: (partial) => set((s) => ({ colors: { ...s.colors, ...partial } })),
-  setDefaults: (colors) => set({ defaults: colors, colors }),
+  setDefaults: (colors) =>
+    set((s) => ({
+      defaults: colors,
+      colors: s.ready ? s.colors : colors,
+    })),
   setStrength: (strength) => set({ strength }),
   setClip: (clip) => set({ clip }),
   setClips: (clips) => set({ clips }),
+  setHeadwear: (headwear) => set({ headwear }),
   setReady: (ready) => set({ ready }),
   setLoadError: (loadError) => set({ loadError }),
   setDetected: (detected) => set({ detected }),
@@ -64,16 +72,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
   reset: () => {
     const { defaults } = get();
-    set({ colors: { ...defaults }, strength: 1 });
+    set({ colors: { ...defaults }, headwear: HEADWEAR[0]!.id, strength: 1 });
   },
-  surprise: () =>
-    set({
-      colors: {
-        hair: pick(PRESETS.hair),
-        skin: pick(PRESETS.skin),
-        eyes: pick(PRESETS.eyes),
-      },
-    }),
   random: () =>
     set({
       colors: {

@@ -118,78 +118,312 @@ function boneWeight(
 ) {
   let w = 0;
   for (let k = 0; k < 4; k++) {
-    const bone = skinIndex.getComponent(vertex, k);
-    if (ids.has(bone)) w += skinWeight.getComponent(vertex, k);
+    if (ids.has(skinIndex.getComponent(vertex, k))) w += skinWeight.getComponent(vertex, k);
   }
   return w;
 }
 
-function percentile(sorted: number[], p: number) {
-  if (!sorted.length) return 0;
-  const i = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
-  return sorted[i]!;
+function weldKey(x: number, y: number, z: number) {
+  return `${Math.round(x * 6000)},${Math.round(y * 6000)},${Math.round(z * 6000)}`;
 }
 
-function isWarmGinger(h: number, s: number, v: number) {
-  const warm = h < 0.13 || h > 0.92;
-  return warm && s > 0.38 && v > 0.12 && v < 0.82;
+type Island = {
+  id: number;
+  tris: number;
+  verts: number[];
+  x: number;
+  y: number;
+  z: number;
+  nx: number;
+  ny: number;
+  nz: number;
+  head: number;
+  neck: number;
+  arm: number;
+  cloth: number;
+};
+
+function vertOf(index: BufferAttribute | null, t: number, k: number) {
+  return index ? index.getX(t * 3 + k) : t * 3 + k;
 }
 
-function isPeachSkin(h: number, s: number, v: number) {
-  const warm = h < 0.14 || h > 0.9;
-  return warm && s > 0.08 && s < 0.62 && v > 0.42;
+function buildUvIslands(
+  count: number,
+  uv: BufferAttribute,
+  index: BufferAttribute | null,
+  triCount: number,
+) {
+  const edgeToTris = new Map<string, number[]>();
+  const uvEdge = (a: number, b: number) => {
+    const ka = `${Math.round(uv.getX(a) * 4096)},${Math.round(uv.getY(a) * 4096)}`;
+    const kb = `${Math.round(uv.getX(b) * 4096)},${Math.round(uv.getY(b) * 4096)}`;
+    return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+  };
+  for (let t = 0; t < triCount; t++) {
+    const a = vertOf(index, t, 0);
+    const b = vertOf(index, t, 1);
+    const c = vertOf(index, t, 2);
+    for (const [p, q] of [
+      [a, b],
+      [b, c],
+      [c, a],
+    ] as const) {
+      const k = uvEdge(p, q);
+      const arr = edgeToTris.get(k);
+      if (arr) arr.push(t);
+      else edgeToTris.set(k, [t]);
+    }
+  }
+  const uvAdj: number[][] = Array.from({ length: triCount }, () => []);
+  for (const arr of edgeToTris.values()) {
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        uvAdj[arr[i]!]!.push(arr[j]!);
+        uvAdj[arr[j]!]!.push(arr[i]!);
+      }
+    }
+  }
+  const islandOfTri = new Int32Array(triCount).fill(-1);
+  let nIslands = 0;
+  for (let t = 0; t < triCount; t++) {
+    if (islandOfTri[t] !== -1) continue;
+    const stack = [t];
+    islandOfTri[t] = nIslands;
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const nb of uvAdj[cur]!) {
+        if (islandOfTri[nb] === -1) {
+          islandOfTri[nb] = nIslands;
+          stack.push(nb);
+        }
+      }
+    }
+    nIslands++;
+  }
+  const islandOfVert = new Int32Array(count).fill(-1);
+  const islandVerts: number[][] = Array.from({ length: nIslands }, () => []);
+  for (let t = 0; t < triCount; t++) {
+    const id = islandOfTri[t]!;
+    for (let k = 0; k < 3; k++) {
+      const v = vertOf(index, t, k);
+      if (islandOfVert[v] === -1) {
+        islandOfVert[v] = id;
+        islandVerts[id]!.push(v);
+      }
+    }
+  }
+  return { nIslands, islandOfTri, islandOfVert, islandVerts };
 }
 
-type SampleRgb = (i: number) => [number, number, number] | null;
+function summarizeIslands(
+  nIslands: number,
+  islandVerts: number[][],
+  islandOfTri: Int32Array,
+  pos: BufferAttribute,
+  nrm: BufferAttribute | undefined,
+  hw: Float32Array,
+  nw: Float32Array,
+  aw: Float32Array,
+  cw: Float32Array,
+): Island[] {
+  const islands: Island[] = [];
+  for (let id = 0; id < nIslands; id++) {
+    const verts = islandVerts[id]!;
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    let nx = 0;
+    let ny = 0;
+    let nz = 0;
+    let head = 0;
+    let neck = 0;
+    let arm = 0;
+    let cloth = 0;
+    const n = Math.max(verts.length, 1);
+    for (const v of verts) {
+      x += pos.getX(v);
+      y += pos.getY(v);
+      z += pos.getZ(v);
+      if (nrm) {
+        nx += nrm.getX(v);
+        ny += nrm.getY(v);
+        nz += nrm.getZ(v);
+      }
+      head += hw[v]!;
+      neck += nw[v]!;
+      arm += aw[v]!;
+      cloth += cw[v]!;
+    }
+    islands.push({
+      id,
+      tris: 0,
+      verts,
+      x: x / n,
+      y: y / n,
+      z: z / n,
+      nx: nx / n,
+      ny: ny / n,
+      nz: nz / n,
+      head: head / n,
+      neck: neck / n,
+      arm: arm / n,
+      cloth: cloth / n,
+    });
+  }
+  for (let t = 0; t < islandOfTri.length; t++) islands[islandOfTri[t]!]!.tris++;
+  return islands;
+}
 
-function makeSampler(map: Texture | null | undefined, uv: BufferAttribute | undefined): SampleRgb {
-  const img = map?.image as { width?: number; height?: number; data?: Uint8ClampedArray } | HTMLImageElement | HTMLCanvasElement | undefined;
-  if (!img || !uv) return () => null;
+function buildSpatialGraph(count: number, pos: BufferAttribute, index: BufferAttribute | null, triCount: number) {
+  const weldOf = new Int32Array(count);
+  const weldMembers: number[][] = [];
+  const buckets = new Map<string, number>();
+  for (let i = 0; i < count; i++) {
+    const key = weldKey(pos.getX(i), pos.getY(i), pos.getZ(i));
+    let id = buckets.get(key);
+    if (id === undefined) {
+      id = weldMembers.length;
+      buckets.set(key, id);
+      weldMembers.push([]);
+    }
+    weldOf[i] = id;
+    weldMembers[id]!.push(i);
+  }
+  const nWeld = weldMembers.length;
+  const wx = new Float32Array(nWeld);
+  const wy = new Float32Array(nWeld);
+  const wz = new Float32Array(nWeld);
+  for (let w = 0; w < nWeld; w++) {
+    const mem = weldMembers[w]!;
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    for (const v of mem) {
+      x += pos.getX(v);
+      y += pos.getY(v);
+      z += pos.getZ(v);
+    }
+    const n = mem.length;
+    wx[w] = x / n;
+    wy[w] = y / n;
+    wz[w] = z / n;
+  }
 
-  let width = 0;
-  let height = 0;
-  let data: Uint8ClampedArray | Uint8Array | null = null;
+  const adj: number[][] = Array.from({ length: nWeld }, () => []);
+  const seen = new Set<number>();
+  const link = (a: number, b: number) => {
+    if (a === b) return;
+    const lo = a < b ? a : b;
+    const hi = a < b ? b : a;
+    const k = lo * 1_000_000 + hi;
+    if (seen.has(k)) return;
+    seen.add(k);
+    adj[a]!.push(b);
+    adj[b]!.push(a);
+  };
+  for (let t = 0; t < triCount; t++) {
+    const a = weldOf[vertOf(index, t, 0)]!;
+    const b = weldOf[vertOf(index, t, 1)]!;
+    const c = weldOf[vertOf(index, t, 2)]!;
+    link(a, b);
+    link(b, c);
+    link(c, a);
+  }
 
-  if ("data" in img && img.data && img.width && img.height) {
-    width = img.width;
-    height = img.height;
-    data = img.data;
-  } else if (typeof HTMLCanvasElement !== "undefined") {
-    try {
-      const w = (img as HTMLImageElement).width || 0;
-      const h = (img as HTMLImageElement).height || 0;
-      if (!w || !h) return () => null;
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) return () => null;
-      ctx.drawImage(img as CanvasImageSource, 0, 0);
-      const pix = ctx.getImageData(0, 0, w, h);
-      width = w;
-      height = h;
-      data = pix.data;
-    } catch {
-      return () => null;
+  const cell = 0.012;
+  const grid = new Map<string, number[]>();
+  const cellKey = (x: number, y: number, z: number) =>
+    `${Math.floor(x / cell)},${Math.floor(y / cell)},${Math.floor(z / cell)}`;
+  for (let w = 0; w < nWeld; w++) {
+    const k = cellKey(wx[w]!, wy[w]!, wz[w]!);
+    const list = grid.get(k);
+    if (list) list.push(w);
+    else grid.set(k, [w]);
+  }
+  const radius = 0.014;
+  const r2 = radius * radius;
+  for (let w = 0; w < nWeld; w++) {
+    const x = wx[w]!;
+    const y = wy[w]!;
+    const z = wz[w]!;
+    const cx0 = Math.floor(x / cell);
+    const cy0 = Math.floor(y / cell);
+    const cz0 = Math.floor(z / cell);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const list = grid.get(`${cx0 + dx},${cy0 + dy},${cz0 + dz}`);
+          if (!list) continue;
+          for (const u of list) {
+            if (u <= w) continue;
+            const ddx = wx[u]! - x;
+            const ddy = wy[u]! - y;
+            const ddz = wz[u]! - z;
+            if (ddx * ddx + ddy * ddy + ddz * ddz <= r2) link(w, u);
+          }
+        }
+      }
     }
   }
 
-  if (!data || !width || !height) return () => null;
-
-  return (i: number) => {
-    const u = uv.getX(i);
-    const v = uv.getY(i);
-    const x = Math.min(width - 1, Math.max(0, Math.floor(((u % 1) + 1) % 1 * width)));
-    const y = Math.min(height - 1, Math.max(0, Math.floor((1 - (((v % 1) + 1) % 1)) * height)));
-    const p = (y * width + x) * 4;
-    return [data![p] ?? 0, data![p + 1] ?? 0, data![p + 2] ?? 0];
-  };
+  return { weldOf, weldMembers, nWeld, adj };
 }
 
-function classifyVertices(
-  mesh: Mesh,
-  map?: Texture | null,
-): { hair: Float32Array; skin: Float32Array; eyeRig: EyeRig | null; stats: MaskStats } {
+function floodFill(
+  cls: Uint8Array,
+  weldOf: Int32Array,
+  weldMembers: number[][],
+  adj: number[][],
+  allow: (v: number, kind: number) => boolean,
+) {
+  const nWeld = weldMembers.length;
+  const wcls = new Uint8Array(nWeld);
+  for (let w = 0; w < nWeld; w++) {
+    let hairN = 0;
+    let skinN = 0;
+    let eyeN = 0;
+    for (const v of weldMembers[w]!) {
+      if (cls[v] === CLS_HAIR) hairN++;
+      else if (cls[v] === CLS_SKIN) skinN++;
+      else if (cls[v] === CLS_EYES) eyeN++;
+    }
+    wcls[w] = eyeN >= 1 ? CLS_EYES : hairN >= skinN && hairN > 0 ? CLS_HAIR : skinN > 0 ? CLS_SKIN : CLS_NONE;
+  }
+  const queue: number[] = [];
+  for (let w = 0; w < nWeld; w++) {
+    if (wcls[w] === CLS_HAIR || wcls[w] === CLS_SKIN) queue.push(w);
+  }
+  let qi = 0;
+  while (qi < queue.length) {
+    const w = queue[qi++]!;
+    const kind = wcls[w]!;
+    for (const u of adj[w]!) {
+      if (wcls[u] !== CLS_NONE) continue;
+      const sample = weldMembers[u]![0]!;
+      if (!allow(sample, kind)) continue;
+      wcls[u] = kind;
+      queue.push(u);
+    }
+  }
+  for (let w = 0; w < nWeld; w++) {
+    const kind = wcls[w]!;
+    if (kind === CLS_NONE) continue;
+    for (const v of weldMembers[w]!) cls[v] = kind;
+  }
+}
+
+/**
+ * Geometry-first mapper for the Tripo single-mesh bake.
+ *
+ * The atlas overlaps hair/face/shirt, and the mesh is ~2k disconnected
+ * UV shells (curls are not watertight). So we:
+ *   1. label each UV island from bones + a neck-based face frame
+ *   2. flood-fill across welded 3D + proximity so curls become one region
+ *   3. pick a left/right eye island pair on the face
+ *
+ * Never paints the atlas — labels live on vertices.
+ */
+function classifyVertices(mesh: Mesh) {
   const geo = mesh.geometry as BufferGeometry;
   const pos = geo.getAttribute("position") as BufferAttribute;
   const nrm = geo.getAttribute("normal") as BufferAttribute | undefined;
@@ -198,238 +432,352 @@ function classifyVertices(
   const skinWeight = geo.getAttribute("skinWeight") as BufferAttribute | undefined;
   const skeleton = (mesh as Mesh & { skeleton?: Skeleton }).skeleton;
   const count = pos.count;
-  const hair = new Float32Array(count);
-  const skin = new Float32Array(count);
-  const sample = makeSampler(map ?? null, uv);
+  const index = geo.index;
+  const triCount = index ? index.count / 3 : Math.floor(count / 3);
 
   const headIds = new Set<number>();
   const neckIds = new Set<number>();
   const armIds = new Set<number>();
+  const clothIds = new Set<number>();
   skeleton?.bones.forEach((bone, i) => {
     const name = bone.name || "";
-    if (/^head$/i.test(name) || (/head/i.test(name) && !/thigh|wear|headwear/i.test(name))) headIds.add(i);
+    if (/head/i.test(name) && !/thigh|wear/i.test(name)) headIds.add(i);
     else if (/neck/i.test(name)) neckIds.add(i);
-    else if (/arm|hand|wrist|finger|thumb/i.test(name)) armIds.add(i);
+    else if (/forearm|upperarm|hand|wrist|finger|thumb/i.test(name)) armIds.add(i);
+    else if (/spine|waist|pelvis|hip|thigh|calf|foot|toe|root|clavicle/i.test(name)) clothIds.add(i);
   });
 
-  const headIdx: number[] = [];
-  const hwArr = new Float32Array(count);
+  const hw = new Float32Array(count);
+  const nw = new Float32Array(count);
+  const aw = new Float32Array(count);
+  const cw = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    if (!skinIndex || !skinWeight) continue;
+    hw[i] = headIds.size ? boneWeight(skinIndex, skinWeight, i, headIds) : 0;
+    nw[i] = boneWeight(skinIndex, skinWeight, i, neckIds);
+    aw[i] = boneWeight(skinIndex, skinWeight, i, armIds);
+    cw[i] = boneWeight(skinIndex, skinWeight, i, clothIds);
+  }
+
+  let hx = 0;
+  let hy = 0;
+  let hz = 0;
+  let headN = 0;
   let yMin = Infinity;
   let yMax = -Infinity;
-  let cx = 0;
-  let cy = 0;
-  let cz = 0;
-
+  let nz = 0;
+  let neckZ = 0;
+  let neckN = 0;
+  let coreZ = 0;
+  let coreN = 0;
   for (let i = 0; i < count; i++) {
-    const hw = skinIndex && skinWeight && headIds.size ? boneWeight(skinIndex, skinWeight, i, headIds) : 0;
-    const nw = skinIndex && skinWeight ? boneWeight(skinIndex, skinWeight, i, neckIds) : 0;
-    const aw = skinIndex && skinWeight ? boneWeight(skinIndex, skinWeight, i, armIds) : 0;
-    hwArr[i] = hw;
-    if (aw > 0.22) {
-      skin[i] = 1;
-      continue;
+    if (nw[i]! > 0.28) {
+      neckZ += pos.getZ(i);
+      neckN++;
     }
-    if (nw > 0.28 && hw < 0.5) {
-      skin[i] = 1;
-      continue;
-    }
-    if (hw > 0.22) {
-      headIdx.push(i);
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const z = pos.getZ(i);
-      cx += x;
-      cy += y;
-      cz += z;
-      if (y < yMin) yMin = y;
-      if (y > yMax) yMax = y;
-    }
-  }
-
-  const headN = Math.max(headIdx.length, 1);
-  cx /= headN;
-  cy /= headN;
-  cz /= headN;
-  const span = Math.max(yMax - yMin, 0.001);
-
-  const midBand: number[] = [];
-  for (const i of headIdx) {
-    const y = pos.getY(i);
-    const t = (y - yMin) / span;
-    if (t > 0.22 && t < 0.58) midBand.push(i);
-  }
-  let mx = 0;
-  let my = 0;
-  let mz = 0;
-  for (const i of midBand) {
-    mx += pos.getX(i);
-    my += pos.getY(i);
-    mz += pos.getZ(i);
-  }
-  const midN = Math.max(midBand.length, 1);
-  mx /= midN;
-  my /= midN;
-  mz /= midN;
-  const faceSign = Math.sign(mz - cz) || 1;
-
-  const zs: number[] = [];
-  const xs: number[] = [];
-  const rads: number[] = [];
-  for (const i of headIdx) {
-    const x = pos.getX(i) - cx;
-    const z = pos.getZ(i) - cz;
-    xs.push(Math.abs(pos.getX(i) - cx));
-    zs.push((pos.getZ(i) - cz) * faceSign);
-    rads.push(Math.hypot(x, z));
-  }
-  xs.sort((a, b) => a - b);
-  zs.sort((a, b) => a - b);
-  rads.sort((a, b) => a - b);
-  const xFace = percentile(xs, 0.42);
-  const zFront = percentile(zs, 0.78);
-  const rFace = percentile(rads, 0.48);
-
-  const yHair = yMin + span * 0.58;
-  const yBrow = yMin + span * 0.52;
-  const yLip = yMin + span * 0.22;
-
-  for (const i of headIdx) {
+    if (hw[i]! <= 0.22) continue;
+    headN++;
     const x = pos.getX(i);
     const y = pos.getY(i);
     const z = pos.getZ(i);
-    const fwd = (z - cz) * faceSign;
-    const lat = Math.abs(x - cx);
-    const rad = Math.hypot(x - cx, z - cz);
-    const nz = nrm ? nrm.getZ(i) * faceSign : 1;
-    const rgb = sample(i);
-    let texHair = false;
-    let texSkin = false;
-    if (rgb) {
-      const [hh, ss, vv] = rgbToHsv(rgb[0], rgb[1], rgb[2]);
-      texHair = isWarmGinger(hh, ss, vv);
-      texSkin = isPeachSkin(hh, ss, vv);
-    }
+    hx += x;
+    hy += y;
+    hz += z;
+    if (y < yMin) yMin = y;
+    if (y > yMax) yMax = y;
+    if (nrm) nz += nrm.getZ(i);
+  }
+  headN = Math.max(headN, 1);
+  hx /= headN;
+  hy /= headN;
+  hz /= headN;
+  const span = Math.max(yMax - yMin, 0.001);
+  if (neckN) neckZ /= neckN;
 
-    const high = y >= yHair;
-    const back = fwd < zFront * 0.15;
-    const sideCurl = lat > xFace * 1.15 || rad > rFace * 1.12;
-    const facePlate =
-      y < yBrow &&
-      y > yLip &&
-      lat < Math.max(xFace, 0.07) &&
-      fwd > zFront * 0.35 &&
-      rad < rFace * 1.08 &&
-      nz > -0.05;
-
-    if (high || back || sideCurl) {
-      hair[i] = 1;
-    } else if (facePlate && !texHair) {
-      skin[i] = 1;
-    } else if (texSkin && !texHair && y < yBrow) {
-      skin[i] = 1;
-    } else {
-      hair[i] = 1;
+  // Face direction from the neck (in front of the torso), not hair volume.
+  // Hair puffs are asymmetric and previously flipped this sign, painting the face as hair.
+  let faceSign = Math.sign(neckN ? neckZ - hz : 0);
+  if (faceSign === 0) {
+    for (let i = 0; i < count; i++) {
+      if (hw[i]! <= 0.4) continue;
+      const rad = Math.hypot(pos.getX(i) - hx, pos.getZ(i) - hz);
+      if (rad > 0.08) continue;
+      coreZ += pos.getZ(i);
+      coreN++;
     }
+    faceSign = Math.sign(coreN ? coreZ / coreN - hz : nz) || 1;
   }
 
-  const index = geo.index;
-  if (index) {
-    const nextHair = hair.slice();
-    const nextSkin = skin.slice();
-    for (let pass = 0; pass < 2; pass++) {
-      for (let t = 0; t < index.count; t += 3) {
-        const a = index.getX(t);
-        const b = index.getX(t + 1);
-        const c = index.getX(t + 2);
-        const trio = [a, b, c];
-        const hairN = trio.filter((v) => hair[v] > 0.5).length;
-        const skinN = trio.filter((v) => skin[v] > 0.5).length;
-        for (const v of trio) {
-          if (hair[v] > 0.5 || skin[v] > 0.5) continue;
-          if (hwArr[v] < 0.12) continue;
-          if (hairN >= 2) nextHair[v] = 1;
-          else if (skinN >= 2) nextSkin[v] = 1;
-        }
+  const yJaw = yMin + span * 0.16;
+  const yHairline = yMin + span * 0.66;
+  const yEyeLo = yMin + span * 0.36;
+  const yEyeHi = yMin + span * 0.58;
+
+  const inFaceCone = (x: number, y: number, z: number, nzVert: number) => {
+    const t = (y - yMin) / span;
+    const fwd = (z - hz) * faceSign;
+    const lat = Math.abs(x - hx);
+    const rad = Math.hypot(x - hx, z - hz);
+    const nzFwd = nzVert * faceSign;
+    if (t < 0.08 || t > 0.68) return false;
+    if (fwd < 0.02) return false;
+    if (lat > 0.11) return false;
+    if (rad > 0.12) return false;
+    if (nzFwd < -0.2) return false;
+    return true;
+  };
+  const onEar = (x: number, y: number, z: number) => {
+    const t = (y - yMin) / span;
+    const fwd = (z - hz) * faceSign;
+    const lat = Math.abs(x - hx);
+    return lat > 0.1 && lat < 0.18 && t > 0.18 && t < 0.55 && Math.abs(fwd) < 0.055;
+  };
+  const inMouth = (x: number, y: number, z: number) => {
+    const t = (y - yMin) / span;
+    const fwd = (z - hz) * faceSign;
+    const lat = Math.abs(x - hx);
+    return t > 0.1 && t < 0.42 && fwd > 0.03 && lat < 0.072;
+  };
+
+  const cls = new Uint8Array(count);
+  let nIslands = 0;
+  let islandOfVert = new Int32Array(count).fill(-1);
+  let islands: Island[] = [];
+
+  if (uv) {
+    const built = buildUvIslands(count, uv, index, triCount);
+    nIslands = built.nIslands;
+    islandOfVert = built.islandOfVert;
+    islands = summarizeIslands(
+      nIslands,
+      built.islandVerts,
+      built.islandOfTri,
+      pos,
+      nrm,
+      hw,
+      nw,
+      aw,
+      cw,
+    );
+    const islandClass = new Uint8Array(nIslands);
+    for (const isl of islands) {
+      let kind = CLS_NONE;
+      if (isl.arm > 0.4) kind = CLS_SKIN;
+      else if (isl.cloth > 0.5 && isl.head < 0.22) kind = CLS_NONE;
+      else if (isl.neck > 0.32 && isl.head < 0.55) {
+        const fwd = (isl.z - hz) * faceSign;
+        kind = fwd > 0.0 ? CLS_SKIN : CLS_HAIR;
+      } else if (isl.head > 0.28) {
+        const face = inFaceCone(isl.x, isl.y, isl.z, isl.nz);
+        const ear = onEar(isl.x, isl.y, isl.z);
+        const mouth = inMouth(isl.x, isl.y, isl.z);
+        kind = face || ear || mouth ? CLS_SKIN : CLS_HAIR;
       }
-      hair.set(nextHair);
-      skin.set(nextSkin);
+      islandClass[isl.id] = kind;
+    }
+    for (let i = 0; i < count; i++) {
+      const id = islandOfVert[i]!;
+      if (id >= 0) cls[i] = islandClass[id]!;
+    }
+  } else {
+    for (let i = 0; i < count; i++) {
+      if (aw[i]! > 0.4) cls[i] = CLS_SKIN;
+      else if (cw[i]! > 0.5 && hw[i]! < 0.22) cls[i] = CLS_NONE;
+      else if (hw[i]! > 0.28) {
+        cls[i] = inFaceCone(pos.getX(i), pos.getY(i), pos.getZ(i), nrm ? nrm.getZ(i) : 1) ? CLS_SKIN : CLS_HAIR;
+      }
     }
   }
 
-  for (let i = 0; i < count; i++) {
-    if (hair[i] > 0.5 && skin[i] > 0.5) {
-      skin[i] = 0;
+  const { weldOf, weldMembers, adj } = buildSpatialGraph(count, pos, index, triCount);
+
+  floodFill(cls, weldOf, weldMembers, adj, (v, kind) => {
+    if (kind === CLS_HAIR) {
+      if (aw[v]! > 0.45) return false;
+      if (cw[v]! > 0.55 && hw[v]! < 0.2) return false;
+      if (inFaceCone(pos.getX(v), pos.getY(v), pos.getZ(v), nrm ? nrm.getZ(v) : 1)) return false;
+      if (inMouth(pos.getX(v), pos.getY(v), pos.getZ(v))) return false;
+      if (hw[v]! > 0.18) return true;
+      if (nw[v]! > 0.2 && (pos.getZ(v) - hz) * faceSign < 0) return true;
+      return false;
+    }
+    if (kind === CLS_SKIN) {
+      if (cls[v] === CLS_HAIR) return false;
+      if (aw[v]! > 0.28) return true;
+      if (nw[v]! > 0.22 && (pos.getZ(v) - hz) * faceSign > 0) return true;
+      if (inFaceCone(pos.getX(v), pos.getY(v), pos.getZ(v), nrm ? nrm.getZ(v) : 1)) return true;
+      if (inMouth(pos.getX(v), pos.getY(v), pos.getZ(v))) return true;
+      if (onEar(pos.getX(v), pos.getY(v), pos.getZ(v)) && hw[v]! > 0.2) return true;
+      return false;
+    }
+    return false;
+  });
+
+  // Eyes: small UV islands on the face, paired left/right.
+  type EyeCand = { id: number; x: number; y: number; z: number; ax: number; fwd: number; tris: number; side: number };
+  const cands: EyeCand[] = [];
+  for (const isl of islands) {
+    if (isl.tris < 5 || isl.tris > 80) continue;
+    if (isl.head < 0.45) continue;
+    if (isl.y < yEyeLo - 0.02 || isl.y > yEyeHi + 0.02) continue;
+    const fwd = (isl.z - hz) * faceSign;
+    if (fwd < 0.04) continue;
+    const ax = Math.abs(isl.x - hx);
+    if (ax < 0.022 || ax > 0.1) continue;
+    const nzFwd = isl.nz * faceSign;
+    if (nzFwd < -0.1) continue;
+    cands.push({
+      id: isl.id,
+      x: isl.x,
+      y: isl.y,
+      z: isl.z,
+      ax,
+      fwd,
+      tris: isl.tris,
+      side: isl.x < hx ? -1 : 1,
+    });
+  }
+  let bestL: EyeCand | null = null;
+  let bestR: EyeCand | null = null;
+  let bestScore = Infinity;
+  const left = cands.filter((c) => c.side < 0);
+  const right = cands.filter((c) => c.side > 0);
+  for (const L of left) {
+    for (const R of right) {
+      const dy = Math.abs(L.y - R.y);
+      const dz = Math.abs(L.z - R.z);
+      const dax = Math.abs(L.ax - R.ax);
+      const dtris = Math.abs(L.tris - R.tris) / 80;
+      if (dy > 0.028 || dz > 0.03 || dax > 0.03) continue;
+      const score = dy * 4 + dz * 3 + dax * 2 + dtris - (L.fwd + R.fwd) * 0.15;
+      if (score < bestScore) {
+        bestScore = score;
+        bestL = L;
+        bestR = R;
+      }
     }
   }
 
+  let eyeRig: EyeRig;
+  if (bestL && bestR) {
+    for (let i = 0; i < count; i++) {
+      const id = islandOfVert[i]!;
+      if (id === bestL.id || id === bestR.id) cls[i] = CLS_EYES;
+    }
+    const growEyes = (cx0: number, cy0: number, cz0: number) => {
+      for (let i = 0; i < count; i++) {
+        if (cls[i] !== CLS_SKIN && cls[i] !== CLS_EYES) continue;
+        const dx = pos.getX(i) - cx0;
+        const dy = pos.getY(i) - cy0;
+        const dz = pos.getZ(i) - cz0;
+        if (dx * dx + dy * dy + dz * dz < 0.012 * 0.012) cls[i] = CLS_EYES;
+      }
+    };
+    growEyes(bestL.x, bestL.y, bestL.z);
+    growEyes(bestR.x, bestR.y, bestR.z);
+    eyeRig = {
+      left: new Vector3(bestL.x, bestL.y, bestL.z),
+      right: new Vector3(bestR.x, bestR.y, bestR.z),
+      iris: 0.022,
+      pupil: 0.0075,
+      faceSign,
+    };
+  } else {
+    const leftIds: number[] = [];
+    const rightIds: number[] = [];
+    for (let i = 0; i < count; i++) {
+      if (cls[i] !== CLS_SKIN) continue;
+      const y = pos.getY(i);
+      if (y < yEyeLo || y > yEyeHi) continue;
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const fwd = (z - hz) * faceSign;
+      if (fwd < 0.05) continue;
+      const ax = Math.abs(x - hx);
+      if (ax < 0.025 || ax > 0.09) continue;
+      (x < hx ? leftIds : rightIds).push(i);
+    }
+    const centroid = (ids: number[], fallback: Vector3) => {
+      if (ids.length < 6) return fallback;
+      const c = new Vector3();
+      for (const i of ids) c.add(new Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+      return c.multiplyScalar(1 / ids.length);
+    };
+    const yMid = (yEyeLo + yEyeHi) * 0.5;
+    const leftC = centroid(leftIds, new Vector3(hx - 0.05, yMid, hz + faceSign * 0.1));
+    const rightC = centroid(rightIds, new Vector3(hx + 0.05, yMid, hz + faceSign * 0.1));
+    for (const i of [...leftIds, ...rightIds]) {
+      const c = pos.getX(i) < hx ? leftC : rightC;
+      const dx = pos.getX(i) - c.x;
+      const dy = pos.getY(i) - c.y;
+      const dz = pos.getZ(i) - c.z;
+      if (dx * dx + dy * dy + dz * dz < 0.018 * 0.018) cls[i] = CLS_EYES;
+    }
+    eyeRig = { left: leftC, right: rightC, iris: 0.02, pupil: 0.007, faceSign };
+  }
+
+  // Weld consensus — eyes win, then majority hair/skin
+  for (const members of weldMembers) {
+    let hairN = 0;
+    let skinN = 0;
+    let eyeN = 0;
+    for (const i of members) {
+      if (cls[i] === CLS_EYES) eyeN++;
+      else if (cls[i] === CLS_HAIR) hairN++;
+      else if (cls[i] === CLS_SKIN) skinN++;
+    }
+    const maj =
+      eyeN > 0 ? CLS_EYES : hairN === 0 && skinN === 0 ? CLS_NONE : hairN >= skinN ? CLS_HAIR : CLS_SKIN;
+    for (const i of members) cls[i] = maj;
+  }
+
+  const hair = new Float32Array(count);
+  const skin = new Float32Array(count);
+  const eyes = new Float32Array(count);
+  const color = new Float32Array(count * 3);
   let hairN = 0;
   let skinN = 0;
+  let eyeN = 0;
   for (let i = 0; i < count; i++) {
-    if (hair[i] > 0.5) hairN++;
-    else if (skin[i] > 0.5) skinN++;
+    if (cls[i] === CLS_HAIR) {
+      hair[i] = 1;
+      color[i * 3] = 1;
+      hairN++;
+    } else if (cls[i] === CLS_SKIN) {
+      skin[i] = 1;
+      color[i * 3 + 1] = 1;
+      skinN++;
+    } else if (cls[i] === CLS_EYES) {
+      eyes[i] = 1;
+      color[i * 3 + 2] = 1;
+      eyeN++;
+    }
   }
 
   return {
     hair,
     skin,
-    eyeRig: findEyeRig(pos, nrm, headIdx, yMin, yMax, cx, cy, cz, faceSign),
-    stats: { width: 0, height: 0, hair: hairN, skin: skinN, eyes: 0, ms: 0, faceSign },
+    eyes,
+    color,
+    eyeRig,
+    stats: {
+      width: nIslands,
+      height: weldMembers.length,
+      hair: hairN,
+      skin: skinN,
+      eyes: eyeN,
+      ms: 0,
+      faceSign,
+    },
   };
 }
 
-function findEyeRig(
-  pos: BufferAttribute,
-  nrm: BufferAttribute | undefined,
-  head: number[],
-  yMin: number,
-  yMax: number,
-  cx: number,
-  cy: number,
-  cz: number,
-  faceSign: number,
-): EyeRig | null {
-  if (head.length < 40) {
-    return {
-      left: new Vector3(cx - 0.038, cy, cz + faceSign * 0.08),
-      right: new Vector3(cx + 0.038, cy, cz + faceSign * 0.08),
-      iris: 0.022,
-      pupil: 0.0075,
-      faceSign,
-    };
-  }
-  const hy = Math.max(yMax - yMin, 0.001);
-  const yLo = yMin + hy * 0.34;
-  const yHi = yMin + hy * 0.58;
-  const left: number[] = [];
-  const right: number[] = [];
-  for (const i of head) {
-    const x = pos.getX(i);
-    const y = pos.getY(i);
-    const z = pos.getZ(i);
-    if (y < yLo || y > yHi) continue;
-    const fwd = (z - cz) * faceSign;
-    if (fwd < 0.01) continue;
-    const ax = Math.abs(x - cx);
-    if (ax < 0.016 || ax > 0.09) continue;
-    const nz = nrm ? nrm.getZ(i) * faceSign : 1;
-    if (nz < -0.2) continue;
-    (x < cx ? left : right).push(i);
-  }
-  const centroid = (ids: number[]) => {
-    const c = new Vector3();
-    if (!ids.length) return c;
-    for (const i of ids) c.add(new Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
-    return c.multiplyScalar(1 / ids.length);
-  };
-  const fallbackL = new Vector3(cx - 0.038, yMin + hy * 0.46, cz + faceSign * 0.07);
-  const fallbackR = new Vector3(cx + 0.038, yMin + hy * 0.46, cz + faceSign * 0.07);
-  return {
-    left: left.length >= 5 ? centroid(left) : fallbackL,
-    right: right.length >= 5 ? centroid(right) : fallbackR,
-    iris: 0.022,
-    pupil: 0.0075,
-    faceSign,
-  };
+export function findEyeRig(mesh: Mesh): EyeRig | null {
+  const geo = mesh.geometry as BufferGeometry;
+  const pos = geo.getAttribute("position") as BufferAttribute | undefined;
+  if (!pos) return null;
+  const { eyeRig } = classifyVertices(mesh);
+  return eyeRig;
 }
 
 export type MaskStats = {
@@ -451,45 +799,46 @@ type RecolorUniforms = {
   uEyeR: { value: Vector3 };
   uPupil: { value: number };
   uIris: { value: number };
-  uFaceSign: { value: number };
 };
 
+/**
+ * Vertex-region recolorer. Leaves the atlas untouched.
+ * Hair / skin / eyes are UV-island labels grown by a 3D flood-fill.
+ */
 export class TextureRecolorer {
   defaults: ColorSet;
   eyeRig: EyeRig | null;
   stats: MaskStats;
   private uniforms: RecolorUniforms | null = null;
-  private mat: MeshStandardMaterial | null = null;
 
-  constructor(map: Texture | null | undefined, mesh: Mesh) {
+  constructor(_map: Texture | null | undefined, mesh: Mesh) {
     const t0 = performance.now();
-    const { hair, skin, eyeRig, stats } = classifyVertices(mesh, map);
+    const { hair, skin, eyes, color, eyeRig, stats } = classifyVertices(mesh);
     const geo = mesh.geometry as BufferGeometry;
     geo.setAttribute("aHair", new Float32BufferAttribute(hair, 1));
     geo.setAttribute("aSkin", new Float32BufferAttribute(skin, 1));
+    geo.setAttribute("aEyes", new Float32BufferAttribute(eyes, 1));
+    geo.setAttribute("color", new Float32BufferAttribute(color, 3));
 
     this.eyeRig = eyeRig;
     this.defaults = { ...FALLBACK_COLORS };
     this.stats = { ...stats, ms: performance.now() - t0 };
 
     const mat = mesh.material as MeshStandardMaterial;
-    this.mat = mat;
+    mat.vertexColors = true;
     const u: RecolorUniforms = {
       uHair: { value: new Color(FALLBACK_COLORS.hair) },
       uSkin: { value: new Color(FALLBACK_COLORS.skin) },
       uEyes: { value: new Color(FALLBACK_COLORS.eyes) },
       uStrength: { value: 1 },
-      uEyeL: { value: eyeRig?.left.clone() ?? new Vector3(-0.04, 0.8, 0.12) },
-      uEyeR: { value: eyeRig?.right.clone() ?? new Vector3(0.04, 0.8, 0.12) },
-      uPupil: { value: eyeRig?.pupil ?? 0.0075 },
-      uIris: { value: eyeRig?.iris ?? 0.022 },
-      uFaceSign: { value: eyeRig?.faceSign ?? 1 },
+      uEyeL: { value: eyeRig.left.clone() },
+      uEyeR: { value: eyeRig.right.clone() },
+      uPupil: { value: eyeRig.pupil },
+      uIris: { value: eyeRig.iris },
     };
     this.uniforms = u;
 
-    const prev = mat.onBeforeCompile;
-    mat.onBeforeCompile = (shader: WebGLProgramParametersWithUniforms, renderer) => {
-      if (typeof prev === "function") prev(shader, renderer);
+    mat.onBeforeCompile = (shader: WebGLProgramParametersWithUniforms) => {
       shader.uniforms.uHair = u.uHair;
       shader.uniforms.uSkin = u.uSkin;
       shader.uniforms.uEyes = u.uEyes;
@@ -498,7 +847,6 @@ export class TextureRecolorer {
       shader.uniforms.uEyeR = u.uEyeR;
       shader.uniforms.uPupil = u.uPupil;
       shader.uniforms.uIris = u.uIris;
-      shader.uniforms.uFaceSign = u.uFaceSign;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -506,8 +854,10 @@ export class TextureRecolorer {
           `#include <common>
 attribute float aHair;
 attribute float aSkin;
+attribute float aEyes;
 varying float vHair;
 varying float vSkin;
+varying float vEyes;
 varying vec3 vBindPos;`,
         )
         .replace(
@@ -515,6 +865,7 @@ varying vec3 vBindPos;`,
           `#include <begin_vertex>
 vHair = aHair;
 vSkin = aSkin;
+vEyes = aEyes;
 vBindPos = position;`,
         );
 
@@ -530,60 +881,64 @@ uniform vec3 uEyeL;
 uniform vec3 uEyeR;
 uniform float uPupil;
 uniform float uIris;
-uniform float uFaceSign;
 varying float vHair;
 varying float vSkin;
+varying float vEyes;
 varying vec3 vBindPos;
 
-vec3 tintLuma(vec3 src, vec3 tint) {
-  float y = dot(src, vec3(0.2126, 0.7152, 0.0722));
-  float ty = max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.08);
-  return tint * (y / ty);
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1.0e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+vec3 hsv2rgb(vec3 c) {
+  vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+vec3 applyTint(vec3 src, vec3 tint) {
+  vec3 sh = rgb2hsv(src);
+  vec3 th = rgb2hsv(tint);
+  float v = mix(max(sh.z, 0.14), max(th.z, max(sh.z, 0.14)), 0.42);
+  return hsv2rgb(vec3(th.x, th.y, v));
 }`,
         )
         .replace(
-          "#include <map_fragment>",
-          `#include <map_fragment>
-{
+          "#include <color_fragment>",
+          `{
   vec3 src = diffuseColor.rgb;
   float y = dot(src, vec3(0.2126, 0.7152, 0.0722));
   vec3 gray = vec3(y);
   float k = clamp(uStrength, 0.0, 1.0);
-
-  float h = clamp(vHair, 0.0, 1.0);
-  float s = clamp(vSkin, 0.0, 1.0);
-  if (h > 0.0 && s > 0.0) {
-    float sum = h + s;
-    h /= sum;
-    s /= sum;
-  }
-  float part = max(h, s);
-
-  vec3 tint = h * uHair + s * uSkin;
-  vec3 painted = part > 0.001 ? tintLuma(src, tint) : src;
-
-  float dL = distance(vBindPos, uEyeL);
-  float dR = distance(vBindPos, uEyeR);
-  vec3 ec = dL < dR ? uEyeL : uEyeR;
-  vec2 eyeXy = vBindPos.xy - ec.xy;
-  float r = length(eyeXy);
-  float fwd = (vBindPos.z - ec.z) * uFaceSign;
-  float mx = max(src.r, max(src.g, src.b));
-  float mn = min(src.r, min(src.g, src.b));
-  bool sclera = (mx - mn) < 0.14 && y > 0.58;
-  bool inDisk = r < uIris && abs(fwd) < 0.03 && fwd > -0.012;
-  if (inDisk && !sclera) {
+  float h = max(vHair, vColor.r);
+  float s = max(vSkin, vColor.g);
+  float e = max(vEyes, vColor.b);
+  vec3 painted = src;
+  float winner = 0.0;
+  if (e > 0.45) {
+    vec3 ec = distance(vBindPos, uEyeL) < distance(vBindPos, uEyeR) ? uEyeL : uEyeR;
+    float r = distance(vBindPos, ec);
+    float mx = max(src.r, max(src.g, src.b));
+    float mn = min(src.r, min(src.g, src.b));
+    bool sclera = (mx - mn) < 0.16 && y > 0.58;
     if (r < uPupil) {
-      painted = vec3(0.05, 0.035, 0.03);
-    } else {
-      float t = clamp((r - uPupil) / max(uIris - uPupil, 0.0001), 0.0, 1.0);
-      float ring = smoothstep(0.0, 0.18, t) * (1.0 - smoothstep(0.72, 1.0, t));
-      painted = tintLuma(src, uEyes) * mix(0.55, 1.12, ring);
+      painted = vec3(0.045, 0.03, 0.025);
+      winner = 1.0;
+    } else if (!sclera) {
+      painted = applyTint(src, uEyes);
+      winner = 1.0;
     }
-    part = 1.0;
+  } else if (h > 0.45 && h >= s) {
+    painted = applyTint(src, uHair);
+    winner = 1.0;
+  } else if (s > 0.45) {
+    painted = applyTint(src, uSkin);
+    winner = 1.0;
   }
-
-  if (part > 0.001) {
+  if (winner > 0.5) {
     diffuseColor.rgb = mix(gray, painted, k);
   } else {
     diffuseColor.rgb = mix(gray, src, k);
@@ -591,7 +946,7 @@ vec3 tintLuma(vec3 src, vec3 tint) {
 }`,
         );
     };
-    mat.customProgramCacheKey = () => "orbyt-region-recolor-v2";
+    mat.customProgramCacheKey = () => "orbyt-island-flood-v6";
     mat.needsUpdate = true;
   }
 

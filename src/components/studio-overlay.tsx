@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Dices, Palette, RotateCcw, ScanFace, Shuffle } from "lucide-react";
 import { PRESETS, type Channel } from "@/lib/recolor";
+import { HEADWEAR } from "@/lib/headwear";
 import { useStudio } from "@/lib/store";
 import { FaceMatch } from "./face-match";
 import { ShareQr } from "./share-qr";
@@ -68,6 +69,8 @@ export function StudioOverlay() {
   const reset = useStudio((s) => s.reset);
   const random = useStudio((s) => s.random);
   const totallyRandom = useStudio((s) => s.totallyRandom);
+  const headwear = useStudio((s) => s.headwear);
+  const setHeadwear = useStudio((s) => s.setHeadwear);
 
   return (
     <>
@@ -75,8 +78,8 @@ export function StudioOverlay() {
       <div className="studio-chrome">
         <div className="studio-top">
           <header className="brand-lockup stagger-item">
-            <p className="eyebrow">Studio</p>
-            <h1>Orbyt: Custom Character</h1>
+            <p className="eyebrow">Custom Character</p>
+            <h1>Orbyt</h1>
             <p className="lede">Recolor hair, skin and eyes — or match them from a face.</p>
           </header>
 
@@ -106,7 +109,7 @@ export function StudioOverlay() {
         <LiquidGlass as="aside" className="studio-panel">
           <div className="panel-head">
             <h2>Customize</h2>
-            <p>Hair, skin and eyes are mapped on the mesh. Clothes stay put.</p>
+            <p>Strength 0 is grayscale. Hair, skin and eyes fill in as you raise it. Clothes stay put at 100%.</p>
           </div>
 
           <div className="lg-tabs" role="tablist" aria-label="Studio panels">
@@ -134,6 +137,23 @@ export function StudioOverlay() {
           </div>
 
           {tab === "colors" ? (
+            <>
+            <section className="lg-well">
+              <h3>Headwear</h3>
+              <div className="style-grid">
+                {HEADWEAR.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={cn("style-chip", headwear === item.id && "is-active")}
+                    aria-pressed={headwear === item.id}
+                    onClick={() => setHeadwear(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </section>
             <section className="lg-well">
               <h3>Colors</h3>
               <div className="space-y-4">
@@ -166,11 +186,10 @@ export function StudioOverlay() {
                   onChange={(e) => setStrength(Number(e.target.value) / 100)}
                   className="strength-range"
                 />
+                <span className="w-10 tabular-nums">{Math.round(strength * 100)}%</span>
               </label>
-              <p className="mt-2 text-xs text-muted">
-                Strength 0 is grayscale. At 100% hair, skin and iris take the picked colours.
-              </p>
             </section>
+            </>
           ) : (
             <FaceMatch />
           )}
